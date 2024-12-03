@@ -1,10 +1,7 @@
-
 #ifndef __SMMTT_DEFS_H__
 #define __SMMTT_DEFS_H__
 
 /* Parameterize based on build and bitness */
-
-#if defined(SMMTT_QEMU)
 
 #include "linux/kvm.h"
 
@@ -12,24 +9,7 @@
 #define __SMMTT32
 #elif defined(TARGET_RISCV64)
 #define __SMMTT64
-#else
-#error "Unknown target for QEMU"
 #endif
-
-#elif defined(SMMTT_OPENSBI)
-
-#include <sbi/sbi_const.h>
-
-#if __riscv_xlen == 32
-#define __SMMTT32
-#elif __riscv_xlen == 64
-#define __SMMTT64
-#else
-#error "Unknown xlen for OpenSBI"
-#endif
-
-#else
-#error "Must be included from QEMU or OpenSBI"
 #endif
 
 /* SMMTT Modes */
