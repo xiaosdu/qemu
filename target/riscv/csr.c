@@ -451,12 +451,18 @@ static RISCVException sstateen(CPURISCVState *env, int csrno)
         }
     }
 
+    if(env->debugger) {
+        return RISCV_EXCP_NONE;
+    }
+    if(env->priv < PRV_M) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
     return RISCV_EXCP_NONE;
 }
 
 static RISCVException mttp(CPURISCVState *env, int csrno)
 {
-    // Todo: this may not be fully right yet (M-mode accesses only?)
     if(!riscv_cpu_cfg(env)->ext_smsdid) {
         return RISCV_EXCP_ILLEGAL_INST;
     }
