@@ -879,7 +879,7 @@ static int get_physical_address_smmtt(CPURISCVState *env, int *prot, hwaddr addr
             *prot = PAGE_RWX;
             return TRANSLATE_SUCCESS;
     }
-    smmtt_has_privs = smmtt_hart_has_privs(env, addr, size, access_type,
+    smmtt_has_privs = smmtt_hart_has_privs(env, addr, size, 1 << access_type,
                                            &smmtt_priv, mode);
     if(!smmtt_has_privs) {
         *prot = 0;

@@ -1,65 +1,49 @@
-
 #include "smmtt.h"
 
 #include "qemu/log.h"
 #include "qapi/error.h"
 #include "trace.h"
 #include "exec/exec-all.h"
-#include "smmtt_defs.h"
 
-static const unsigned long long masks_rw[] = {
-        SPA_MTTL3_MASK, SPA_MTTL2_RW_MASK, SPA_MTTL1_MASK, SPA_MTTL0_MASK
-};
+/*
+ * Definitions
+ */
 
 static const unsigned long long masks[] = {
-        SPA_MTTL3_MASK, SPA_MTTL2_MASK, SPA_MTTL1_MASK, SPA_MTTL0_MASK
+        SPA_PN0, SPA_PN1, SPA_PN2,
+#if defined(TARGET_RISCV64)
+        SPA_PN3
+#endif
 };
 
-// MTT table shifts
-#define MTTL3_SHIFT     (46)
+#define MTTL2_FIELD_GET(entry, field) ((entry)->field)
 
-#define MTTL2_RW_SHIFT  (25)
-#define MTTL1_RW_SHIFT  (16)
+#define MTTL2_TYPE(type) \
+    (SMMTT_TYPE_##type)
 
-#define MTTL2_SHIFT     (26)
-#define MTTL1_SHIFT     (17)
-
-static const unsigned int shifts_rw[] = {
-        MTTL3_SHIFT, MTTL2_RW_SHIFT, MTTL1_RW_SHIFT, 0
-};
-
-static const unsigned int shifts[] = {
-        MTTL3_SHIFT, MTTL2_SHIFT, MTTL1_SHIFT, 0
-};
-
-#define MTTL2_2M_PAGES_SHIFT    (21) /* 2 megabytes */
-#define MTTL2_RW_PAGES_MASK     (0b11)
-#define MTTL2_PAGES_MASK        (0b1)
+#define IS_MTTL2_1G_TYPE(type) \
+    ((type) == SMMTT_TYPE_1G_DISALLOW || \
+     (type) == SMMTT_TYPE_1G_ALLOW_RX || \
+     (type) == SMMTT_TYPE_1G_ALLOW_RW || \
+     (type) == SMMTT_TYPE_1G_ALLOW_RWX)
 
 /*
  * Internal helpers
  */
 
-static int smmtt_decode_mttp(CPURISCVState *env, bool *rw, int *levels) {
-    smmtt_mode_t smmtt_mode = get_field(env->mttp, MTTP_MODE_MASK);
+static int smmtt_decode_mttp(CPURISCVState *env, int *levels) {
+    smmtt_mode_t smmtt_mode = get_field(env->mttp, MTTP_MODE);
 
-    switch(smmtt_mode) {
+    switch (smmtt_mode) {
         case SMMTT_BARE:
             *levels = -1;
             break;
 
-            // Determine if rw
 #if defined(TARGET_RISCV32)
-        case SMMTT_34_rw:
+            // fall through
+            case SMMTT_34:
 #elif defined(TARGET_RISCV64)
-        case SMMTT_46_rw:
-#endif
-            *rw = true;
-#if defined(TARGET_RISCV32)
-        // fall through
-        case SMMTT_34:
-#elif defined(TARGET_RISCV64)
-        // fall through
+            // fall through
         case SMMTT_46:
 #endif
             *levels = 2;
@@ -67,9 +51,6 @@ static int smmtt_decode_mttp(CPURISCVState *env, bool *rw, int *levels) {
 
             // Handle 56 bit lookups (3 stage)
 #if defined(TARGET_RISCV64)
-        case SMMTT_56_rw:
-            *rw = true;
-        // fall through
         case SMMTT_56:
             *levels = 3;
             break;
@@ -81,114 +62,150 @@ static int smmtt_decode_mttp(CPURISCVState *env, bool *rw, int *levels) {
     return 0;
 }
 
-static int smmtt_decode_mttl2(hwaddr addr, bool rw, smmtt_mtt_entry_t entry,
-                              int *privs, hwaddr *next, bool *done) {
-    smmtt_type_t type;
-    smmtt_type_rw_t type_rw;
-    target_ulong idx;
+static int mttl1_privs_from_perms(uint64_t perms, int *privs) {
+    switch((smmtt_perms_mtt_l1_dir_t) perms) {
+        case SMMTT_PERMS_MTT_L1_DIR_DISALLOWED:
+            *privs = 0;
+            break;
 
-    *done = false;
-    if(rw) {
-        if(entry.zero != 0) {
-            *done = true;
-            return 0;
-        }
+        case SMMTT_PERMS_MTT_L1_DIR_ALLOW_RX:
+            *privs |= (PROT_READ | PROT_EXEC);
+            break;
 
-        type_rw = (smmtt_type_rw_t) entry.type;
-        switch(type_rw) {
-            case SMMTT_TYPE_RW_DISALLOW_1G:
-                *privs = 0;
-                *done = true;
-                break;
+        case SMMTT_PERMS_MTT_L1_DIR_ALLOW_RW:
+            *privs |= (PROT_READ | PROT_WRITE);
+            break;
 
-            case SMMTT_TYPE_RW_ALLOW_RW_1G:
-                *privs |= PAGE_WRITE;
-                // fall through
-            case SMMTT_TYPE_RW_ALLOW_R_1G:
-                *privs |= PAGE_READ;
-                *done = true;
-                break;
-
-            case SMMTT_TYPE_RW_2M_PAGES:
-                if(entry.info >> 32 != 0) {
-                    return -1;
-                }
-
-                idx = (addr & SPA_MTTL2_RW_MASK) >> MTTL2_2M_PAGES_SHIFT;
-                switch(get_field(entry.info, MTTL2_RW_PAGES_MASK << idx)) {
-                    case SMMTT_PERMS_2M_PAGES_DISALLOWED:
-                        *privs = 0;
-                        break;
-
-                    case SMMTT_PERMS_2M_PAGES_ALLOW_RWX:
-                        *privs |= PAGE_WRITE;
-                        // fall through
-                    case SMMTT_PERMS_2M_PAGES_ALLOW_RX:
-                        *privs |= PAGE_READ;
-                        break;
-
-                    default:
-                        return -1;
-                }
-
-                *done = true;
-                break;
-
-            case SMMTT_TYPE_RW_MTT_L1_DIR:
-                *next = entry.info << PGSHIFT;
-                *done = false;
-                break;
-
-            default:
-                return -1;
-        }
-    } else {
-        if(entry.mttl2.zero != 0) {
-            return false;
-        }
-
-        type = (smmtt_type_t) entry.mttl2.type;
-        switch(type) {
-            case SMMTT_TYPE_1G_DISALLOW:
-                *privs = 0;
-                *done = true;
-                break;
-            case SMMTT_TYPE_1G_ALLOW:
-                *privs = (PAGE_READ | PAGE_WRITE | PAGE_EXEC);
-                *done = true;
-                break;
-
-            case SMMTT_TYPE_2M_PAGES:
-                if(entry.mttl2.info >> 32 != 0) {
-                    return -1;
-                }
-
-                idx = (addr & SPA_MTTL2_MASK) >> MTTL2_2M_PAGES_SHIFT;
-                switch(get_field(entry.mttl2.info, MTTL2_PAGES_MASK << idx)) {
-                    case 0b0:
-                        *privs = 0;
-                        break;
-
-                    case 0b1:
-                        *privs = (PAGE_READ | PAGE_WRITE | PAGE_EXEC);
-                        break;
-
-                    default:
-                        return -1;
-                }
-
-                *done = true;
-                break;
-
-            case SMMTT_TYPE_MTT_L1_DIR:
-                *next = entry.mttl2.info << PGSHIFT;
-                *done = false;
-                break;
-        }
+        case SMMTT_PERMS_MTT_L1_DIR_ALLOW_RWX:
+            *privs |= (PROT_READ | PROT_WRITE | PROT_EXEC);
     }
 
     return 0;
 }
+
+static int smmtt_decode_mttl1(hwaddr addr, mttl1_entry_t entry, int *privs) {
+    target_ulong offset = get_field(addr, SPA_PN0);
+    uint64_t field = MTT_PERM_FIELD(offset);
+    uint64_t perms = get_field(entry, field);
+
+    return mttl1_privs_from_perms(perms, privs);
+}
+
+static int mttl2_xm_privs_from_perms(uint64_t perms, int *privs) {
+    switch((smmtt_perms_xm_pages_t) perms) {
+        case SMMTT_PERMS_XM_PAGES_DISALLOWED:
+            *privs = 0;
+            break;
+
+        case SMMTT_PERMS_XM_PAGES_ALLOW_RX:
+            *privs |= (PROT_READ | PROT_EXEC);
+            break;
+
+        case SMMTT_PERMS_XM_PAGES_ALLOW_RW:
+            *privs |= (PROT_READ | PROT_WRITE);
+            break;
+
+        case SMMTT_PERMS_XM_PAGES_ALLOW_RWX:
+            *privs |= (PROT_READ | PROT_WRITE | PROT_EXEC);
+    }
+
+    return 0;
+}
+
+static int smmtt_decode_mttl2_xm_pages(hwaddr addr, mttl2_entry_t entry,
+                                       int *privs) {
+    target_ulong idx;
+    uint64_t perms;
+    uint32_t field;
+
+#if defined(TARGET_RISCV32)
+    if (entry.info >> 16 != 0) {
+        return -1;
+    }
+#else
+    if (entry.info >> 32 != 0) {
+        return -1;
+    }
+#endif
+
+    idx = get_field(addr, SPA_XM_OFFS);
+    field = MTT_PERM_FIELD( idx);
+    perms = get_field(entry.info, field);
+
+    return mttl2_xm_privs_from_perms(perms, privs);;
+}
+
+static int mttl2_1g_privs_from_type(uint64_t type, int *privs) {
+    switch((smmtt_type_t) type) {
+        case SMMTT_TYPE_1G_DISALLOW:
+            *privs = 0;
+            break;
+
+        case SMMTT_TYPE_1G_ALLOW_RX:
+            *privs |= (PROT_READ | PROT_EXEC);
+            break;
+
+        case SMMTT_TYPE_1G_ALLOW_RW:
+            *privs |= (PROT_READ | PROT_WRITE);
+            break;
+
+        case SMMTT_TYPE_1G_ALLOW_RWX:
+            *privs |= (PROT_READ | PROT_WRITE | PROT_EXEC);
+            break;
+
+        default:
+            *privs = 0;
+            return -1;
+    }
+
+    return 0;
+}
+
+static int smmtt_decode_mttl2(hwaddr addr, mttl2_entry_t entry,
+                              int *privs, hwaddr *next, bool *done) {
+    int ret = 0;
+    uint64_t type;
+    *done = false;
+
+    if (entry.zero != 0) {
+        *done = true;
+        return -1;
+    }
+
+    type = entry.type;
+
+    if (type == SMMTT_TYPE_MTT_L1_DIR) {
+        *next = (hwaddr) entry.info << PGSHIFT;
+        *done = false;
+    } else
+#if defined(TARGET_RISCV32)
+        if (type == SMMTT_TYPE_4M_PAGES) {
+#else
+        if (type == SMMTT_TYPE_2M_PAGES) {
+#endif
+        ret = smmtt_decode_mttl2_xm_pages(addr, entry, privs);
+        *done = true;
+    } else if (IS_MTTL2_1G_TYPE(type)) {
+        ret = mttl2_1g_privs_from_type(type, privs);
+        *done = true;
+    } else {
+        return -1;
+    }
+
+    return ret;
+}
+
+#if defined(TARGET_RISCV64)
+static int smmtt_decode_mttl3(mttl3_entry_t entry, hwaddr *next, bool *done) {
+    if (entry.zero != 0) {
+        return -1;
+    }
+
+    *next = entry.mttl2_ppn << PGSHIFT;
+    *done = false;
+    return 0;
+}
+#endif
 
 /*
  * Public Interface
@@ -196,17 +213,13 @@ static int smmtt_decode_mttl2(hwaddr addr, bool rw, smmtt_mtt_entry_t entry,
 
 
 bool smmtt_hart_has_privs(CPURISCVState *env, hwaddr addr,
-                        target_ulong size, int privs,
-                        int *allowed_privs, target_ulong mode) {
+                          target_ulong size, int privs,
+                          int *allowed_privs, target_ulong mode) {
     // SMMTT configuration
-    bool rw = false;
     int levels = 0;
     smmtt_mtt_entry_t entry = {
             .raw = 0,
     };
-
-    const unsigned int *sh;
-    const unsigned long long *msk;
 
     // Results and indices
     bool done = false;
@@ -216,17 +229,17 @@ bool smmtt_hart_has_privs(CPURISCVState *env, hwaddr addr,
     hwaddr curr;
 
     CPUState *cs = env_cpu(env);
-    if(!riscv_cpu_cfg(env)->ext_smmtt || (mode == PRV_M)) {
+    if (!riscv_cpu_cfg(env)->ext_smmtt || (mode == PRV_M)) {
         *allowed_privs = (PAGE_READ | PAGE_WRITE | PAGE_EXEC);
         return true;
     }
 
-    ret = smmtt_decode_mttp(env, &rw, &levels);
-    if(ret < 0) {
+    ret = smmtt_decode_mttp(env, &levels);
+    if (ret < 0) {
         return false;
     }
 
-    if(levels == -1) {
+    if (levels == -1) {
         // This must be SMMTT_BARE, so SMMTT will allow accesses here
         *allowed_privs = (PAGE_READ | PAGE_WRITE | PAGE_EXEC);
     } else {
@@ -235,70 +248,38 @@ bool smmtt_hart_has_privs(CPURISCVState *env, hwaddr addr,
         *allowed_privs = 0;
     }
 
-    sh = rw ? shifts_rw : shifts;
-    msk = rw ? masks_rw : masks;
-    curr = (hwaddr) get_field(env->mttp, MTTP_PPN_MASK) << PGSHIFT;
+    curr = (hwaddr) get_field(env->mttp, MTTP_PPN) << PGSHIFT;
 
-    for(; levels >= 0 && !done; levels--) {
-        idx = (addr >> sh[levels]) & msk[levels];
-        if(levels != 0) {
-            // Fetch an entry
-            curr = curr + idx * 8;
-            entry.raw = address_space_ldq(cs->as, curr, MEMTXATTRS_UNSPECIFIED, &res);
+    for (; levels > 0 && !done; levels--) {
+        idx = get_field(addr, masks[levels]);
+        curr = curr + idx * sizeof(target_ulong);
+        entry.raw = address_space_ldq(cs->as, curr, MEMTXATTRS_UNSPECIFIED, &res);
+        if (res != MEMTX_OK) {
+            return false;
         }
 
         switch (levels) {
+#if defined(TARGET_RISCV64)
             case 3:
-                if(entry.mttl3.zero != 0) {
+                ret = smmtt_decode_mttl3(entry.mttl3, &curr, &done);
+                if (ret < 0) {
                     return false;
                 }
-
-                curr = entry.mttl3.mttl2_ppn << PGSHIFT;
                 break;
+#endif
 
             case 2:
-                ret = smmtt_decode_mttl2(addr, rw, entry, allowed_privs,
+                ret = smmtt_decode_mttl2(addr, entry.mttl2, allowed_privs,
                                          &curr, &done);
-                if(ret < 0) {
+                if (ret < 0) {
                     return false;
                 }
                 break;
 
             case 1:
-                // Do nothing here besides translate, and preserve
-                // entry for the next go around
-                break;
-
-            case 0:
-                if(rw) {
-                    switch(get_field(entry.mttl1, 0b1111 << idx)) {
-                        case 0b0000:
-                            *allowed_privs = 0;
-                            break;
-
-                        case 0b0011:
-                            *allowed_privs |= (PROT_WRITE);
-                            // fall through
-                        case 0b0001:
-                            *allowed_privs |= (PROT_READ);
-                            break;
-
-                        default:
-                            return false;
-                    }
-                } else {
-                    switch(get_field(entry.mttl1, 0b11 << idx)) {
-                        case 0b00:
-                            *allowed_privs = 0;
-                            break;
-
-                        case 0b11:
-                            *allowed_privs = (PROT_READ | PROT_WRITE | PROT_EXEC);
-                            break;
-
-                        default:
-                            return false;
-                    }
+                ret = smmtt_decode_mttl1(addr, entry.mttl1, allowed_privs);
+                if (ret < 0) {
+                    return false;
                 }
                 break;
 
@@ -306,12 +287,6 @@ bool smmtt_hart_has_privs(CPURISCVState *env, hwaddr addr,
                 return false;
 
         }
-    }
-
-    // ASSUMPTION: we assume that read implies execute, and leave it up to other
-    // parts of the memory hierarchy to indicate execute permissions.
-    if(*allowed_privs & PROT_READ) {
-        *allowed_privs |= PROT_EXEC;
     }
 
     return (privs & *allowed_privs) == privs;

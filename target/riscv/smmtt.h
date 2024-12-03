@@ -20,7 +20,6 @@
 #define RISCV_SMMTT_H
 
 #include "qemu/osdep.h"
-#include "linux/kvm.h"
 #include "cpu.h"
 #include "smmtt_defs.h"
 
