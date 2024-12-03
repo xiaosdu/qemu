@@ -2805,13 +2805,13 @@ static RISCVException write_mttp(CPURISCVState *env, int csrno, target_ulong new
                 return RISCV_EXCP_ILLEGAL_INST;
             }
             break;
+#endif
         default:
             // A write to mttp with an unsupported MODE value is not ignored.
             // Instead, the fields of mttp are WARL in the normal way.
             new_val = set_field(new_val, MTTP_MODE_MASK,
                                 get_field(env->mttp, MTTP_MODE_MASK));
             break;
-#endif
     }
     // All good, write value
     env->mttp = new_val;
