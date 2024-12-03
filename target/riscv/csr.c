@@ -185,25 +185,6 @@ static RISCVException zcmt(CPURISCVState *env, int csrno)
     return RISCV_EXCP_NONE;
 }
 
-static RISCVException cfi_ss(CPURISCVState *env, int csrno)
-{
-    if (!env_archcpu(env)->cfg.ext_zicfiss) {
-        return RISCV_EXCP_ILLEGAL_INST;
-    }
-
-    /* if bcfi not active for current env, access to csr is illegal */
-    if (!cpu_get_bcfien(env)) {
-#if !defined(CONFIG_USER_ONLY)
-        if (env->debugger) {
-            return RISCV_EXCP_NONE;
-        }
-#endif
-        return RISCV_EXCP_ILLEGAL_INST;
-    }
-
-    return RISCV_EXCP_NONE;
-}
-
 #if !defined(CONFIG_USER_ONLY)
 static RISCVException mctr(CPURISCVState *env, int csrno)
 {
@@ -452,13 +433,6 @@ static RISCVException sstateen(CPURISCVState *env, int csrno)
         }
     }
 
-    if(env->debugger) {
-        return RISCV_EXCP_NONE;
-    }
-    if(env->priv < PRV_M) {
-        return RISCV_EXCP_ILLEGAL_INST;
-    }
-
     return RISCV_EXCP_NONE;
 }
 
@@ -467,6 +441,15 @@ static RISCVException mttp(CPURISCVState *env, int csrno)
     if(!riscv_cpu_cfg(env)->ext_smsdid) {
         return RISCV_EXCP_ILLEGAL_INST;
     }
+
+    if(env->debugger) {
+        return RISCV_EXCP_NONE;
+    }
+
+    if(env->priv < PRV_M) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
     return RISCV_EXCP_NONE;
 }
 
@@ -657,19 +640,6 @@ static RISCVException seed(CPURISCVState *env, int csrno)
 #endif
 }
 
-/* zicfiss CSR_SSP read and write */
-static int read_ssp(CPURISCVState *env, int csrno, target_ulong *val)
-{
-    *val = env->ssp;
-    return RISCV_EXCP_NONE;
-}
-
-static int write_ssp(CPURISCVState *env, int csrno, target_ulong val)
-{
-    env->ssp = val;
-    return RISCV_EXCP_NONE;
-}
-
 /* User Floating-Point CSRs */
 static RISCVException read_fflags(CPURISCVState *env, int csrno,
                                   target_ulong *val)
@@ -782,7 +752,7 @@ static RISCVException write_vxrm(CPURISCVState *env, int csrno,
 static RISCVException read_vxsat(CPURISCVState *env, int csrno,
                                  target_ulong *val)
 {
-    *val = env->vxsat & BIT(0);
+    *val = env->vxsat;
     return RISCV_EXCP_NONE;
 }
 
@@ -792,7 +762,7 @@ static RISCVException write_vxsat(CPURISCVState *env, int csrno,
 #if !defined(CONFIG_USER_ONLY)
     env->mstatus |= MSTATUS_VS;
 #endif
-    env->vxsat = val & BIT(0);
+    env->vxsat = val;
     return RISCV_EXCP_NONE;
 }
 
@@ -1425,7 +1395,6 @@ static const uint64_t all_ints = M_MODE_INTERRUPTS | S_MODE_INTERRUPTS |
                          (1ULL << (RISCV_EXCP_INST_PAGE_FAULT)) | \
                          (1ULL << (RISCV_EXCP_LOAD_PAGE_FAULT)) | \
                          (1ULL << (RISCV_EXCP_STORE_PAGE_FAULT)) | \
-                         (1ULL << (RISCV_EXCP_SW_CHECK)) | \
                          (1ULL << (RISCV_EXCP_INST_GUEST_PAGE_FAULT)) | \
                          (1ULL << (RISCV_EXCP_LOAD_GUEST_ACCESS_FAULT)) | \
                          (1ULL << (RISCV_EXCP_VIRT_INSTRUCTION_FAULT)) | \
@@ -1645,11 +1614,6 @@ static RISCVException write_mstatus(CPURISCVState *env, int csrno,
         if ((val & MSTATUS64_UXL) != 0) {
             mask |= MSTATUS64_UXL;
         }
-    }
-
-    /* If cfi lp extension is available, then apply cfi lp mask */
-    if (env_archcpu(env)->cfg.ext_zicfilp) {
-        mask |= (MSTATUS_MPELP | MSTATUS_SPELP);
     }
 
     mstatus = (mstatus & ~mask) | (val & mask);
@@ -2398,14 +2362,6 @@ static RISCVException write_menvcfg(CPURISCVState *env, int csrno,
         mask |= (cfg->ext_svpbmt ? MENVCFG_PBMTE : 0) |
                 (cfg->ext_sstc ? MENVCFG_STCE : 0) |
                 (cfg->ext_svadu ? MENVCFG_ADUE : 0);
-
-        if (env_archcpu(env)->cfg.ext_zicfilp) {
-            mask |= MENVCFG_LPE;
-        }
-
-        if (env_archcpu(env)->cfg.ext_zicfiss) {
-            mask |= MENVCFG_SSE;
-        }
     }
     env->menvcfg = (env->menvcfg & ~mask) | (val & mask);
 
@@ -2458,17 +2414,6 @@ static RISCVException write_senvcfg(CPURISCVState *env, int csrno,
         return ret;
     }
 
-    if (env_archcpu(env)->cfg.ext_zicfilp) {
-        mask |= SENVCFG_LPE;
-    }
-
-    /* Higher mode SSE must be ON for next-less mode SSE to be ON */
-    if (env_archcpu(env)->cfg.ext_zicfiss &&
-        get_field(env->menvcfg, MENVCFG_SSE) &&
-        (env->virt_enabled ? get_field(env->henvcfg, HENVCFG_SSE) : true)) {
-        mask |= SENVCFG_SSE;
-    }
-
     env->senvcfg = (env->senvcfg & ~mask) | (val & mask);
     return RISCV_EXCP_NONE;
 }
@@ -2506,16 +2451,6 @@ static RISCVException write_henvcfg(CPURISCVState *env, int csrno,
 
     if (riscv_cpu_mxl(env) == MXL_RV64) {
         mask |= env->menvcfg & (HENVCFG_PBMTE | HENVCFG_STCE | HENVCFG_ADUE);
-
-        if (env_archcpu(env)->cfg.ext_zicfilp) {
-            mask |= HENVCFG_LPE;
-        }
-
-        /* H can light up SSE for VS only if HS had it from menvcfg */
-        if (env_archcpu(env)->cfg.ext_zicfiss &&
-            get_field(env->menvcfg, MENVCFG_SSE)) {
-            mask |= HENVCFG_SSE;
-        }
     }
 
     env->henvcfg = (env->henvcfg & ~mask) | (val & mask);
@@ -2770,20 +2705,25 @@ static RISCVException read_mttp(CPURISCVState *env, int csrno, target_ulong *val
     *val = env->mttp;
     return RISCV_EXCP_NONE;
 }
-static RISCVException write_mttp(CPURISCVState *env, int csrno, target_ulong new_val)
+
+static RISCVException write_mttp(CPURISCVState *env, int csrno,
+                                 target_ulong new_val)
 {
-    smmtt_mode_t mode = get_field(new_val, MTTP_MODE_MASK);
+    smmtt_mode_t mode = get_field(new_val, MTTP_MODE);
+
 #if defined(TARGET_RISCV64)
-    hwaddr ppn = get_field(new_val, MTTP_PPN_MASK);
+    hwaddr ppn = get_field(new_val, MTTP_PPN);
 #endif
+
     switch (mode) {
         // If the mode is BARE, the remaining fields (SDID, MTTPPN) in mttp
         // must be set to zeros, else generate a fault.
         case SMMTT_BARE:
-            if ((mode & ~MTTP_MODE_MASK) != 0) {
+            if ((mode & ~MTTP_MODE) != 0) {
                 return RISCV_EXCP_ILLEGAL_INST;
             }
             break;
+
 #if defined(TARGET_RISCV32)
         // MTTL2 must be page-aligned, but this is always true since MTTP
         // holds a PPN and not a physical address.
@@ -2796,6 +2736,7 @@ static RISCVException write_mttp(CPURISCVState *env, int csrno, target_ulong new
                 return RISCV_EXCP_ILLEGAL_INST;
             }
             break;
+
         // MTTL3 must be 8kb aligned
         case SMMTT_56:
             if ((ppn & 0b1) != 0) {
@@ -2803,13 +2744,15 @@ static RISCVException write_mttp(CPURISCVState *env, int csrno, target_ulong new
             }
             break;
 #endif
+
         default:
             // A write to mttp with an unsupported MODE value is not ignored.
             // Instead, the fields of mttp are WARL in the normal way.
-            new_val = set_field(new_val, MTTP_MODE_MASK,
-                                get_field(env->mttp, MTTP_MODE_MASK));
+            new_val = set_field(new_val, MTTP_MODE,
+                                get_field(env->mttp, MTTP_MODE));
             break;
     }
+
     // All good, write value
     env->mttp = new_val;
     return RISCV_EXCP_NONE;
@@ -3030,10 +2973,6 @@ static RISCVException read_sstatus_i128(CPURISCVState *env, int csrno,
         mask |= SSTATUS64_UXL;
     }
 
-    if (env_archcpu(env)->cfg.ext_zicfilp) {
-        mask |= SSTATUS_SPELP;
-    }
-
     *val = int128_make128(sstatus, add_status_sd(MXL_RV128, sstatus));
     return RISCV_EXCP_NONE;
 }
@@ -3045,11 +2984,6 @@ static RISCVException read_sstatus(CPURISCVState *env, int csrno,
     if (env->xl != MXL_RV32 || env->debugger) {
         mask |= SSTATUS64_UXL;
     }
-
-    if (env_archcpu(env)->cfg.ext_zicfilp) {
-        mask |= SSTATUS_SPELP;
-    }
-
     /* TODO: Use SXL not MXL. */
     *val = add_status_sd(riscv_cpu_mxl(env), env->mstatus & mask);
     return RISCV_EXCP_NONE;
@@ -3065,11 +2999,6 @@ static RISCVException write_sstatus(CPURISCVState *env, int csrno,
             mask |= SSTATUS64_UXL;
         }
     }
-
-    if (env_archcpu(env)->cfg.ext_zicfilp) {
-        mask |= SSTATUS_SPELP;
-    }
-
     target_ulong newval = (env->mstatus & ~mask) | (val & mask);
     return write_mstatus(env, CSR_MSTATUS, newval);
 }
@@ -5081,9 +5010,6 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
     /* Zcmt Extension */
     [CSR_JVT] = {"jvt", zcmt, read_jvt, write_jvt},
 
-    /* zicfiss Extension, shadow stack register */
-    [CSR_SSP]  = { "ssp", cfi_ss, read_ssp, write_ssp },
-
 #if !defined(CONFIG_USER_ONLY)
     /* Machine Timers and Counters */
     [CSR_MCYCLE]    = { "mcycle",    any,   read_hpmcounter,
@@ -5221,8 +5147,7 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
                         .min_priv_ver = PRIV_VERSION_1_12_0 },
 
     /* Supervisor domain extensions */
-    [CSR_MTTP] = { "mttp", mttp, read_mttp, write_mttp,
-                        .min_priv_ver = PRIV_VERSION_1_12_0},
+    [CSR_MTTP] = { "mttp", mttp, read_mttp, write_mttp, .min_priv_ver = PRIV_VERSION_1_12_0},
 
     /* Supervisor Trap Setup */
     [CSR_SSTATUS]    = { "sstatus",    smode, read_sstatus,    write_sstatus,
