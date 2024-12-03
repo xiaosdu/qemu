@@ -187,6 +187,7 @@ const RISCVIsaExtData isa_edata_arr[] = {
     ISA_EXT_DATA_ENTRY(smcntrpmf, PRIV_VERSION_1_12_0, ext_smcntrpmf),
     ISA_EXT_DATA_ENTRY(smepmp, PRIV_VERSION_1_12_0, ext_smepmp),
     ISA_EXT_DATA_ENTRY(smsdid, PRIV_VERSION_1_12_0, ext_smsdid),
+    ISA_EXT_DATA_ENTRY(smmtt, PRIV_VERSION_1_12_0, ext_smmtt),
     ISA_EXT_DATA_ENTRY(smstateen, PRIV_VERSION_1_12_0, ext_smstateen),
     ISA_EXT_DATA_ENTRY(ssaia, PRIV_VERSION_1_12_0, ext_ssaia),
     ISA_EXT_DATA_ENTRY(ssccptr, PRIV_VERSION_1_11_0, has_priv_1_11),
@@ -465,6 +466,7 @@ static void riscv_smmtt_cpu_init(Object *obj)
     // extensions related to SMMTT
     riscv_max_cpu_init(obj);
     cpu->cfg.ext_smsdid = true;
+    cpu->cfg.ext_smmtt = true;
 }
 
 #if defined(TARGET_RISCV64)
