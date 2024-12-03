@@ -169,8 +169,16 @@ static void create_fdt_one_memregion(MachineState *ms,
     qemu_fdt_setprop_cells(ms->fdt, path, "base",
                            (uint64_t) s->base >> 32, s->base);
 
-    qemu_fdt_setprop_cell(ms->fdt, path, "order",
-                          (uint32_t) s->order);
+    // qemu_fdt_setprop_cell(ms->fdt, path, "order",
+    //                       (uint32_t) s->order);
+    if (s->order != -1) {
+        qemu_fdt_setprop_cell(ms->fdt, path, "order",
+                              (uint32_t) s->order);
+    }
+    if (s->size != -1) {
+        qemu_fdt_setprop_cells(ms->fdt, path, "size",
+                               (uint64_t) s->size >> 32, s->size);
+    }
 
     if (s->mmio) {
         qemu_fdt_setprop(ms->fdt, path, "mmio", NULL, 0);
@@ -300,6 +308,12 @@ static void opensbi_memregion_instance_init(Object *obj)
     object_property_set_description(obj, "order",
                                     "The order of the domain memory region. This property should have a 32 bit value "
                                     "(i.e. one DT cell) in the range 3 <= order <= __riscv_xlen.");
+    
+    s->size = -1;
+    object_property_add_uint64_ptr(obj, "size", &s->size,
+                                   OBJ_PROP_FLAG_WRITE);
+    object_property_set_description(obj, "size",
+                                    "The size of the domain memory region. This property should have a 64 bit value.");
 
     s->mmio = false;
     object_property_add_bool(obj, "mmio", NULL, set_mmio);
@@ -333,16 +347,34 @@ static void opensbi_memregion_realize(DeviceState *ds, Error **errp)
         return;
     }
 
-    if (s->order == -1) {
-        error_setg(errp, "must specify order");
+    if (s->order == -1 && s->size == -1) {
+        error_setg(errp, "must specify order or size");
         return;
-    }
+    } else if (s->order != -1){
+        /* Check order bounds */
+        if (s->order < 3 || s->order > xlen) {
+            error_setg(errp, "order must be between 3 and %d", xlen);
+            return;
+        }
 
-    /* Check order bounds */
-    if (s->order < 3 || s->order > xlen) {
-        error_setg(errp, "order must be between 3 and %d", xlen);
+        /* Check base alignment */
+        if (s->order < xlen && (s->base & (BIT(s->order) - 1))) {
+            error_setg(errp, "base not aligned to order");
+            return;
+        }
+    } else if (s->order != -1) {
+        /* code */
+    } else {
+        error_setg(errp, "cannot specify both order and size");
         return;
     }
+    /* Cannot have specified both size and order*/
+
+    // /* Check order bounds */
+    // if (s->order < 3 || s->order > xlen) {
+    //     error_setg(errp, "order must be between 3 and %d", xlen);
+    //     return;
+    // }
 
     /* Check base alignment */
     if (s->order < xlen && (s->base & (BIT(s->order) - 1))) {
